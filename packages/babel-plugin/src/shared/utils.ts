@@ -532,7 +532,11 @@ function isBooleanExpression(node: t.Expression): boolean {
   );
 }
 
-export function transformCondition(path: ConditionPath, inline: true): ExpressionArrowFunction;
+export function transformCondition(
+  path: ConditionPath,
+  inline: true,
+  prop?: boolean
+): ExpressionArrowFunction;
 export function transformCondition(
   path: ConditionPath,
   inline: boolean | undefined
@@ -543,7 +547,8 @@ export function transformCondition(
 ): ExpressionArrowFunction | TransformConditionStatements;
 export function transformCondition(
   path: ConditionPath,
-  inline?: boolean
+  inline?: boolean,
+  prop = false
 ): TransformConditionResult {
   const config = getConfig(path);
   let expr = path.node as t.Expression;
@@ -552,6 +557,26 @@ export function transformCondition(
   const memo = config.memoWrapper
     ? registerImportMethod(path, config.memoWrapper, undefined)
     : undefined;
+  const readInline = (condition: t.Expression) => {
+    const thunk = t.arrowFunctionExpression([], condition);
+    if (!memo) return thunk;
+    if (!prop) return t.callExpression(memo, [thunk]);
+
+    // An ownerless prop read evaluates against the shown value (F-1).
+    const read = path.scope.generateUidIdentifier("_read$");
+    const owner = registerImportMethod(path, "getOwner");
+    return t.callExpression(
+      t.arrowFunctionExpression(
+        [read],
+        t.conditionalExpression(
+          t.callExpression(owner, []),
+          t.callExpression(memo, [t.cloneNode(read)]),
+          t.cloneNode(read)
+        )
+      ),
+      [thunk]
+    );
+  };
   let dTest: boolean | undefined,
     cond: t.Expression | undefined,
     id: t.Expression | t.Identifier | undefined;
@@ -568,17 +593,21 @@ export function transformCondition(
       cond = expr.test;
       if (!isBooleanExpression(cond))
         cond = t.unaryExpression("!", t.unaryExpression("!", cond, true), true);
-      id = inline
-        ? memo
-          ? t.callExpression(memo, [t.arrowFunctionExpression([], cond)])
-          : t.arrowFunctionExpression([], cond)
-        : path.scope.generateUidIdentifier("_c$");
+      id = inline ? readInline(cond) : path.scope.generateUidIdentifier("_c$");
       expr.test = t.callExpression(id, []);
       if (t.isConditionalExpression(expr.consequent) || t.isLogicalExpression(expr.consequent)) {
-        expr.consequent = transformCondition(path.get("consequent") as ConditionPath, true).body;
+        expr.consequent = transformCondition(
+          path.get("consequent") as ConditionPath,
+          true,
+          prop
+        ).body;
       }
       if (t.isConditionalExpression(expr.alternate) || t.isLogicalExpression(expr.alternate)) {
-        expr.alternate = transformCondition(path.get("alternate") as ConditionPath, true).body;
+        expr.alternate = transformCondition(
+          path.get("alternate") as ConditionPath,
+          true,
+          prop
+        ).body;
       }
     }
   } else if (t.isLogicalExpression(expr)) {
@@ -604,11 +633,7 @@ export function transformCondition(
       // never evaluates twice.
       const boolLeft = isBooleanExpression(cond);
       if (!boolLeft) cond = t.unaryExpression("!", t.unaryExpression("!", cond, true), true);
-      id = inline
-        ? memo
-          ? t.callExpression(memo, [t.arrowFunctionExpression([], cond)])
-          : t.arrowFunctionExpression([], cond)
-        : path.scope.generateUidIdentifier("_c$");
+      id = inline ? readInline(cond) : path.scope.generateUidIdentifier("_c$");
       if (boolLeft) {
         nextPath.node.left = t.callExpression(id, []);
       } else {

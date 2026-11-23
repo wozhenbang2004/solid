@@ -21,7 +21,7 @@ pub(crate) struct DomTemplateState {
     pub(crate) uses_get_next_match: bool,
     pub(crate) uses_get_first_child: bool,
     pub(crate) uses_get_next_sibling: bool,
-    pub(crate) uses_get_owner: bool,
+    pub(crate) get_owner_local: Option<String>,
     pub(crate) uses_insert: bool,
     pub(crate) uses_scope: bool,
     pub(crate) uses_memo: bool,
@@ -142,7 +142,7 @@ impl DomTemplateState {
             uses_get_next_match: false,
             uses_get_first_child: false,
             uses_get_next_sibling: false,
-            uses_get_owner: false,
+            get_owner_local: None,
             uses_insert: false,
             uses_scope: false,
             uses_memo: false,
@@ -194,8 +194,8 @@ impl<'a> AstDomTransform<'a, '_> {
         if self.template_state.uses_get_next_sibling {
             statements.push(self.import_named("getNextSibling", "_$getNextSibling"));
         }
-        if self.template_state.uses_get_owner {
-            statements.push(self.import_named("getOwner", "_$getOwner"));
+        if let Some(local) = &self.template_state.get_owner_local {
+            statements.push(self.import_named("getOwner", local));
         }
         if self.template_state.uses_insert {
             statements.push(self.import_named("insert", "_$insert"));
@@ -458,9 +458,9 @@ impl<'a> AstDomTransform<'a, '_> {
     /// capture, declared after its positional walks, for the claims at the
     /// tail of its binding effect (`wrap_dynamics_statement`).
     pub(crate) fn owner_capture_statement(&mut self, owner_id: &str) -> Statement<'a> {
-        self.template_state.uses_get_owner = true;
+        let get_owner = self.register_get_owner();
         let span = oxc_span::SPAN;
-        let init = self.call_identifier(span, "_$getOwner", std::vec::Vec::new());
+        let init = self.call_identifier(span, &get_owner, std::vec::Vec::new());
         self.variable_statement(span, owner_id, init)
     }
 

@@ -22,6 +22,16 @@ impl<'a> ConditionBuilder<'a> for AstDomTransform<'a, '_> {
         self.memo_wrapper_local()
     }
 
+    fn register_prop_condition_owner(&mut self) -> Option<String> {
+        if self.module_name != "@solidjs/web"
+            || self.memo_wrapper.as_deref() != Some("memo")
+            || self.wrapper_module_name.is_some()
+        {
+            return None;
+        }
+        Some(self.register_get_owner())
+    }
+
     fn next_condition_id(&mut self) -> String {
         AstDomTransform::next_condition_id(self)
     }

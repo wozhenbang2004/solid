@@ -2,6 +2,22 @@ use crate::dom::element::AstDomTransform;
 use crate::shared::utils::next_unique_local;
 
 impl AstDomTransform<'_, '_> {
+    pub(crate) fn register_get_owner(&mut self) -> String {
+        let bindings = &self.bindings;
+        self.template_state
+            .get_owner_local
+            .get_or_insert_with(|| {
+                let name = "_$getOwner";
+                if bindings.is_taken(name) {
+                    let mut index = 0;
+                    next_unique_local(name, &mut index, bindings)
+                } else {
+                    name.to_string()
+                }
+            })
+            .clone()
+    }
+
     pub(crate) fn next_element_id(&mut self) -> String {
         next_unique_local("_el", &mut self.element_index, &self.bindings)
     }

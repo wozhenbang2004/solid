@@ -18,7 +18,7 @@ use crate::shared::component_props::{
     ComponentPropContext, component_property, component_props_expression,
     component_spread_expression, flush_component_props,
 };
-use crate::shared::condition::{is_condition_shape, transform_condition_inline};
+use crate::shared::condition::{is_condition_shape, transform_prop_condition};
 use crate::shared::mode_lower::mode_ast;
 use crate::shared::refs::component_ref_property;
 use crate::shared::utils::decode_html_entities;
@@ -126,7 +126,7 @@ pub(crate) fn lower_component_with_setup<'a, C: ComponentLower<'a>>(
                 let mut condition_inlined = false;
                 if dynamic && ctx.wrap_conditionals_enabled() && is_condition_shape(&value) {
                     let span = value.span();
-                    value = transform_condition_inline(ctx, span, value);
+                    value = transform_prop_condition(ctx, span, value);
                     condition_inlined = true;
                 }
                 (value, dynamic, condition_inlined)

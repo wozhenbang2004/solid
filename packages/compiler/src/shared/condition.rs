@@ -4,7 +4,7 @@
 //! [`ConditionBuilder`].
 
 use oxc_allocator::{Allocator, CloneIn};
-use oxc_ast::ast::Expression;
+use oxc_ast::ast::{Expression, FormalParameterKind};
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator, LogicalOperator, UnaryOperator};
 
@@ -19,6 +19,10 @@ pub(crate) trait ConditionBuilder<'a> {
     fn memo_wrapper_enabled(&self) -> bool;
     /// Marks the memo helper as used and returns its local identifier.
     fn register_memo(&mut self) -> String;
+    /// The built-in DOM wrapper's owner helper, when available.
+    fn register_prop_condition_owner(&mut self) -> Option<String> {
+        None
+    }
     /// Fresh identifier for a hoisted memoized condition (Babel's `_c$` uid).
     fn next_condition_id(&mut self) -> String;
     /// The shared classification authority (Babel's `isDynamic` probes on
@@ -134,6 +138,13 @@ struct ConditionHoist<'a> {
     id: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConditionMode {
+    Hoisted,
+    Inline,
+    Prop,
+}
+
 pub(crate) fn transform_condition<'a, C: ConditionBuilder<'a>>(
     ctx: &mut C,
     span: Span,
@@ -141,7 +152,12 @@ pub(crate) fn transform_condition<'a, C: ConditionBuilder<'a>>(
     inline: bool,
 ) -> TransformedCondition<'a> {
     let allocator = ctx.condition_allocator();
-    let (expr, hoist) = transform_condition_value(ctx, span, value, inline);
+    let mode = if inline {
+        ConditionMode::Inline
+    } else {
+        ConditionMode::Hoisted
+    };
+    let (expr, hoist) = transform_condition_value(ctx, span, value, mode);
     if let Some(hoist) = hoist {
         debug_assert!(!inline, "inline conditions never hoist");
         let memo_init = memo_expression(ctx, span, hoist.condition);
@@ -167,7 +183,15 @@ pub(crate) fn transform_condition_inline<'a, C: ConditionBuilder<'a>>(
     span: Span,
     value: Expression<'a>,
 ) -> Expression<'a> {
-    transform_condition_value(ctx, span, value, true).0
+    transform_condition_value(ctx, span, value, ConditionMode::Inline).0
+}
+
+pub(crate) fn transform_prop_condition<'a, C: ConditionBuilder<'a>>(
+    ctx: &mut C,
+    span: Span,
+    value: Expression<'a>,
+) -> Expression<'a> {
+    transform_condition_value(ctx, span, value, ConditionMode::Prop).0
 }
 
 /// `memo(thunk)` — or the thunk unchanged when `memoWrapper` is disabled.
@@ -217,11 +241,19 @@ fn condition_test_call<'a, C: ConditionBuilder<'a>>(
     ctx: &mut C,
     span: Span,
     condition: Expression<'a>,
-    inline: bool,
+    mode: ConditionMode,
 ) -> (Expression<'a>, Option<ConditionHoist<'a>>) {
     let allocator = ctx.condition_allocator();
-    if inline {
-        let memo = memo_expression(ctx, span, condition);
+    if mode != ConditionMode::Hoisted {
+        let owner = match mode {
+            ConditionMode::Prop => ctx.register_prop_condition_owner(),
+            _ => None,
+        };
+        let memo = if let Some(owner) = owner {
+            prop_condition_read(ctx, span, condition, &owner)
+        } else {
+            memo_expression(ctx, span, condition)
+        };
         (call_expression_no_args(allocator, span, memo), None)
     } else {
         let id = ctx.next_condition_id();
@@ -235,11 +267,62 @@ fn condition_test_call<'a, C: ConditionBuilder<'a>>(
     }
 }
 
+fn prop_condition_read<'a, C: ConditionBuilder<'a>>(
+    ctx: &mut C,
+    span: Span,
+    condition: Expression<'a>,
+    owner: &str,
+) -> Expression<'a> {
+    // An ownerless prop read evaluates against the shown value (F-1).
+    let allocator = ctx.condition_allocator();
+    let ast = AstBuilder::new(allocator);
+    let read = ast.ident("_read$");
+    let owned = call_expression_no_args(
+        allocator,
+        span,
+        ast.expression_identifier(span, ast.ident(owner)),
+    );
+    let memoized = memo_wrap_thunk(ctx, span, ast.expression_identifier(span, read));
+    let choice =
+        ast.expression_conditional(span, owned, memoized, ast.expression_identifier(span, read));
+    let param = ast.formal_parameter(
+        span,
+        ast.vec(),
+        ast.binding_pattern_binding_identifier(span, read),
+        None,
+        None,
+        false,
+        None,
+        false,
+        false,
+    );
+    let params = ast.formal_parameters(
+        span,
+        FormalParameterKind::ArrowFormalParameters,
+        ast.vec1(param),
+        None,
+    );
+    let body = ast.function_body(
+        span,
+        ast.vec(),
+        ast.vec1(ast.statement_expression(span, choice)),
+    );
+    let choose = ast.expression_arrow_function(span, true, false, None, params, None, body);
+    let thunk = arrow_return_expression(allocator, span, condition);
+    ast.expression_call(
+        span,
+        choose,
+        None,
+        ast.vec1(expression_to_argument(thunk)),
+        false,
+    )
+}
+
 fn transform_condition_value<'a, C: ConditionBuilder<'a>>(
     ctx: &mut C,
     span: Span,
     value: Expression<'a>,
-    inline: bool,
+    mode: ConditionMode,
 ) -> (Expression<'a>, Option<ConditionHoist<'a>>) {
     // Babel's `transformCondition` registers the memo import at entry, before
     // knowing whether the expression actually transforms — so a
@@ -268,12 +351,27 @@ fn transform_condition_value<'a, C: ConditionBuilder<'a>>(
                 return (Expression::ConditionalExpression(conditional), None);
             }
             let condition = booleanize(allocator, span, conditional.test.clone_in(allocator));
-            let (test_call, hoist) = condition_test_call(ctx, span, condition, inline);
+            let (test_call, hoist) = condition_test_call(ctx, span, condition, mode);
             // Nested conditionals/logicals in the branches collapse their own
             // memos inline, exactly like Babel's recursive
             // `transformCondition(..., true).body`.
-            let consequent = inline_branch(ctx, span, conditional.consequent.clone_in(allocator));
-            let alternate = inline_branch(ctx, span, conditional.alternate.clone_in(allocator));
+            let branch_mode = if mode == ConditionMode::Prop {
+                ConditionMode::Prop
+            } else {
+                ConditionMode::Inline
+            };
+            let consequent = inline_branch(
+                ctx,
+                span,
+                conditional.consequent.clone_in(allocator),
+                branch_mode,
+            );
+            let alternate = inline_branch(
+                ctx,
+                span,
+                conditional.alternate.clone_in(allocator),
+                branch_mode,
+            );
             let ast = AstBuilder::new(allocator);
             (
                 ast.expression_conditional(span, test_call, consequent, alternate),
@@ -284,7 +382,7 @@ fn transform_condition_value<'a, C: ConditionBuilder<'a>>(
             (Expression::ConditionalExpression(conditional), None)
         }
         Expression::LogicalExpression(logical) => {
-            transform_logical_chain(ctx, span, Expression::LogicalExpression(logical), inline)
+            transform_logical_chain(ctx, span, Expression::LogicalExpression(logical), mode)
         }
         other => (other, None),
     }
@@ -294,9 +392,10 @@ fn inline_branch<'a, C: ConditionBuilder<'a>>(
     ctx: &mut C,
     span: Span,
     branch: Expression<'a>,
+    mode: ConditionMode,
 ) -> Expression<'a> {
     if is_condition_shape(&branch) {
-        transform_condition_value(ctx, span, branch, true).0
+        transform_condition_value(ctx, span, branch, mode).0
     } else {
         branch
     }
@@ -309,7 +408,7 @@ fn transform_logical_chain<'a, C: ConditionBuilder<'a>>(
     ctx: &mut C,
     span: Span,
     value: Expression<'a>,
-    inline: bool,
+    mode: ConditionMode,
 ) -> (Expression<'a>, Option<ConditionHoist<'a>>) {
     let allocator = ctx.condition_allocator();
     let Expression::LogicalExpression(logical) = value else {
@@ -318,7 +417,7 @@ fn transform_logical_chain<'a, C: ConditionBuilder<'a>>(
     if logical.operator != LogicalOperator::And {
         if matches!(logical.left, Expression::LogicalExpression(_)) {
             let (new_left, hoist) =
-                transform_logical_chain(ctx, span, logical.left.clone_in(allocator), inline);
+                transform_logical_chain(ctx, span, logical.left.clone_in(allocator), mode);
             let ast = AstBuilder::new(allocator);
             return (
                 ast.expression_logical(
@@ -349,7 +448,7 @@ fn transform_logical_chain<'a, C: ConditionBuilder<'a>>(
     // never evaluates twice.
     let bool_left = is_boolean_expression(&logical.left);
     let condition = booleanize(allocator, span, logical.left.clone_in(allocator));
-    let (test_call, hoist) = condition_test_call(ctx, span, condition, inline);
+    let (test_call, hoist) = condition_test_call(ctx, span, condition, mode);
     let ast = AstBuilder::new(allocator);
     let replaced = if bool_left {
         ast.expression_logical(

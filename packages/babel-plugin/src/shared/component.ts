@@ -290,7 +290,13 @@ export default function transformComponent(
               (t.isLogicalExpression(value.expression) ||
                 t.isConditionalExpression(value.expression))
             ) {
-              const expr = transformCondition(attribute.get("value").get("expression"), true);
+              const expr = transformCondition(
+                attribute.get("value").get("expression"),
+                true,
+                config.generate === "dom" &&
+                  config.moduleName === "@solidjs/web" &&
+                  config.memoWrapper === "memo"
+              );
 
               // Getter keys are never computed: `id` is an identifier or a
               // string literal (`get "aria-label"()`), the same property as

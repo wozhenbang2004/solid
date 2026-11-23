@@ -527,7 +527,7 @@ impl<'a, 'source> AstDomTransform<'a, 'source> {
         span: oxc_span::Span,
         element_id: &str,
     ) -> Statement<'a> {
-        self.template_state.uses_get_owner = true;
+        let get_owner = self.register_get_owner();
         let target = AssignmentTarget::StaticMemberExpression(
             self.ast().alloc_static_member_expression(
                 span,
@@ -537,7 +537,7 @@ impl<'a, 'source> AstDomTransform<'a, 'source> {
                 false,
             ),
         );
-        let value = self.call_identifier(span, "_$getOwner", std::vec::Vec::new());
+        let value = self.call_identifier(span, &get_owner, std::vec::Vec::new());
         self.ast().statement_expression(
             span,
             self.ast()
